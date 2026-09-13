@@ -1,0 +1,4 @@
+hidapi==0.15.0
+
+# pynput (output synthesis, recording input capture) and pywin32 (active
+# window on Windows) join here starting at M2/M6, per CLAUDE.md's stack.

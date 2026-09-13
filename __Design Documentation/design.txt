@@ -1,0 +1,52 @@
+I will use Nuitka. 
+Lets create several design docs.
+
+First a UML diagram
+Then a design doc with requirements
+Then something to feed to claude code
+
+Reads input from connected devices and translates to different key mappings / mouse buttons
+headless, event-driven engine, and treat the GUI as a detachable client that configures it.
+
+The core abstractions
+Four data types carry everything. In Python-ish sketch:
+ButtonEvent   device_id, button_id, state (down/up), timestamp
+Trigger       kind ("button" | "chord"), button_ids, device_id
+Action        type ("key" | "mouse" | "text" | "launch" | "delay"), payload
+Binding       trigger -> [Action, Action, ...]     # ordered list
+
+Use the following tree structure:
+core/           # headless engine. no GUI, no OS calls, only interfaces
+  events.py       # ButtonEvent, Trigger, Action, Binding dataclasses
+  engine.py       # wires the stages, owns the event loop
+  chords.py       # chord resolver
+  profiles.py     # profile store + resolution (pure)
+  recorder.py     # capture mode
+devices/        # implements core's InputDevice interface
+  base.py         # discovery + event stream contract
+  hid_pedal.py    # your actual pedal, via hidapi
+platform/       # OS-specific adapters behind interfaces
+  active_window.py
+  output.py       # synthesize keys/mouse (pynput)
+persistence/    # load/save config (JSON or TOML, versioned)
+gui/            # a client of core. can be swapped or removed
+app.py          # entry point, tray icon, starts the engine
+
+bare minimum requirements:
+	- auto detect controllers for mapping
+		- detect possible pedals/controllers connected
+		- detect buttons to map
+	- be able to set buttons to key mapping
+		- buttons can be set to 1 or more keys/mouse buttons by methods of:
+			1. record keyboard input
+				a. automatically will just read the next input(s)
+				b. option available to record key strokes
+					i. will have a start recording/stop recording button.
+	
+Enhancements: 
+	- Profiles
+		- can create and save custom profiles of key mappings
+		- Be able to auto detect active program and be set profile accordingly
+	- Pedal button chords
+		- treat combination of button presses as unique buttons
+		- should be toggleable and save to profiles
