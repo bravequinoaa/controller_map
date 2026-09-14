@@ -19,7 +19,22 @@ class InputDevice(ABC):
     def buttons(self) -> list[int]: ...
 
     @abstractmethod
-    def start(self, on_event: Callable[[ButtonEvent], None]) -> None: ...
+    def start(self, on_event: Callable[[ButtonEvent], None]) -> None:
+        """Start delivering ButtonEvents to on_event.
+
+        on_event may be invoked from a device-owned thread, not the
+        caller's, and nothing currently queues between the device and this
+        callback. Implementations and callers must treat it as something
+        that has to return fast: no I/O, no blocking work. A slow on_event
+        stalls the device's read loop, and for adapters that share one OS
+        listener across several devices (see devices/raw_input.py), it
+        stalls delivery to every device sharing that listener, not just
+        this one. Handing events to a queue drained by a separate worker
+        thread is Engine's responsibility (see architecture.md's
+        concurrency section); on_event must not become that queue's
+        consumer itself.
+        """
+        ...
 
     @abstractmethod
     def stop(self) -> None: ...

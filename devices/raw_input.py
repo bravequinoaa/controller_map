@@ -21,14 +21,22 @@ further.
 This module only reports raw device-path-tagged key/mouse transitions. It
 does not suppress them from reaching the focused window; that is
 grab/suppression, explicitly deferred (see CLAUDE.md guardrails).
+
+RegisterClassW and RegisterRawInputDevices are process-global Win32 calls:
+only one real listener window may exist per process. RawInputSource is
+therefore a ref-counted, multi-subscriber singleton rather than a one-shot
+listener (see its docstring), and callers normally reach it through
+shared_source() rather than constructing it directly.
 """
 
 import ctypes
+import logging
 import threading
 import time
 from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass
+from typing import Protocol
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -208,13 +216,30 @@ kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.GetCurrentThreadId.argtypes = []
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
+_logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class RawInputEvent:
     device_path: str
     signature: str  # e.g. "key:49" or "mouse:left"; opaque past hid_pedal.py
     is_down: bool
-    timestamp: float
+    timestamp: float  # time.monotonic(), immune to wall-clock adjustments
+
+
+class RawInputListener(Protocol):
+    """The start(on_event)/stop() shape HidPedal depends on.
+
+    Both SharedRawInputSource (the production default, see shared_source()
+    below) and a test fake satisfy this with a zero-argument stop(). Note
+    RawInputSource itself does not: it is the multi-subscriber singleton
+    underneath, and its stop() takes on_event so it knows which subscriber
+    to remove. Most callers should go through shared_source() rather than
+    depend on RawInputSource's own shape directly.
+    """
+
+    def start(self, on_event: Callable[["RawInputEvent"], None]) -> None: ...
+    def stop(self) -> None: ...
 
 
 def _get_device_path(hDevice: int) -> str:
@@ -230,37 +255,83 @@ def _get_device_path(hDevice: int) -> str:
 class RawInputSource:
     """Owns a hidden message-only window and pumps WM_INPUT on its own thread.
 
-    start()/stop() may be called repeatedly (a fresh window each time).
-    on_event is invoked from the listener thread; callers that touch shared
-    state from it must synchronize themselves.
+    RegisterClassW and RegisterRawInputDevices are process-global Win32
+    resources: a second real call to either is not safely detectable as a
+    failure after the fact (RegisterRawInputDevices in particular tends to
+    succeed and silently retarget delivery to the newer window rather than
+    error out), so the only correct fix is making sure a second call never
+    happens at all. This class is therefore a ref-counted, multi-subscriber
+    singleton rather than a one-shot listener: start(on_event) appends
+    on_event to a subscriber list and only performs the real Win32
+    registration on the 0 -> 1 transition; stop(on_event) removes it and
+    only tears the window down on the N -> 0 transition. Every subsequent
+    start() while a listener is already running just registers its
+    callback and returns, never reaching the registration calls again.
+
+    Most callers should not construct this directly; use shared_source()
+    below, which hands each caller its own handle onto one process-wide
+    instance. Tests construct RawInputSource directly to exercise the
+    ref-counting and Win32 registration behavior in isolation.
+
+    on_event is invoked from the listener thread for as long as any
+    subscriber remains registered; callers that touch shared state from it
+    must synchronize themselves. It must also return quickly and do no I/O
+    or blocking work (see core/ports.py InputDevice.start): it runs inline
+    with delivery to every other subscriber sharing this thread, so a slow
+    callback stalls WM_INPUT delivery to every device, not just its own. An
+    exception raised from one subscriber's callback is caught and logged so
+    it cannot block delivery to the others.
     """
 
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
         self._ready = threading.Event()
-        self._on_event: Callable[[RawInputEvent], None] | None = None
+        self._lock = threading.Lock()
+        self._subscribers: list[Callable[[RawInputEvent], None]] = []
+        self._start_error: Exception | None = None
         self._wndproc_ref: WNDPROC | None = None  # keep alive so ctypes can't GC it
 
     def start(self, on_event: Callable[[RawInputEvent], None]) -> None:
-        if self._thread is not None:
-            raise RuntimeError("RawInputSource already started")
-        self._on_event = on_event
-        self._ready.clear()
-        self._thread = threading.Thread(target=self._run, name="raw-input-listener", daemon=True)
-        self._thread.start()
-        if not self._ready.wait(timeout=5.0):
-            raise RuntimeError("Raw input listener window failed to start")
+        with self._lock:
+            first_subscriber = not self._subscribers
+            self._subscribers.append(on_event)
+            if not first_subscriber:
+                return  # listener already running; never re-enter Win32 registration
+            self._start_error = None
+            self._ready.clear()
+            self._thread = threading.Thread(target=self._run, name="raw-input-listener", daemon=True)
+            self._thread.start()
 
-    def stop(self) -> None:
-        if self._thread is None:
-            return
-        if self._thread_id is not None:
-            user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
-        self._thread.join(timeout=5.0)
-        self._thread = None
-        self._thread_id = None
-        self._on_event = None
+        ready = self._ready.wait(timeout=5.0)
+        with self._lock:
+            error = self._start_error
+            if not ready or error is not None:
+                if on_event in self._subscribers:
+                    self._subscribers.remove(on_event)
+                self._thread = None
+        if not ready:
+            raise RuntimeError("Raw input listener window failed to start")
+        if error is not None:
+            raise error
+
+    def stop(self, on_event: Callable[[RawInputEvent], None]) -> None:
+        with self._lock:
+            if on_event in self._subscribers:
+                self._subscribers.remove(on_event)
+            if self._subscribers:
+                return  # other subscribers still active; keep the window up
+            thread_id = self._thread_id
+            thread = self._thread
+
+        if thread_id is not None:
+            user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
+        if thread is not None:
+            thread.join(timeout=5.0)
+
+        with self._lock:
+            self._thread = None
+            self._thread_id = None
 
     def _run(self) -> None:
         self._thread_id = kernel32.GetCurrentThreadId()
@@ -280,6 +351,7 @@ class RawInputSource:
         wndclass.lpszClassName = "PedalControllerRawInputWindow"
 
         if not user32.RegisterClassW(ctypes.byref(wndclass)):
+            self._start_error = RuntimeError(f"RegisterClassW failed (error {ctypes.get_last_error()})")
             self._ready.set()
             return
 
@@ -287,12 +359,24 @@ class RawInputSource:
             0, wndclass.lpszClassName, "PedalControllerRawInput",
             0, 0, 0, 0, 0, HWND_MESSAGE, None, wndclass.hInstance, None,
         )
+        if not hwnd:
+            self._start_error = RuntimeError(f"CreateWindowExW failed (error {ctypes.get_last_error()})")
+            user32.UnregisterClassW(wndclass.lpszClassName, wndclass.hInstance)
+            self._ready.set()
+            return
 
         devices = (RAWINPUTDEVICE * 2)(
             RAWINPUTDEVICE(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_KEYBOARD, RIDEV_INPUTSINK, hwnd),
             RAWINPUTDEVICE(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE, RIDEV_INPUTSINK, hwnd),
         )
-        user32.RegisterRawInputDevices(devices, 2, ctypes.sizeof(RAWINPUTDEVICE))
+        if not user32.RegisterRawInputDevices(devices, 2, ctypes.sizeof(RAWINPUTDEVICE)):
+            self._start_error = RuntimeError(
+                f"RegisterRawInputDevices failed (error {ctypes.get_last_error()})"
+            )
+            user32.DestroyWindow(hwnd)
+            user32.UnregisterClassW(wndclass.lpszClassName, wndclass.hInstance)
+            self._ready.set()
+            return
 
         self._ready.set()
 
@@ -316,7 +400,7 @@ class RawInputSource:
         raw = ctypes.cast(buf, ctypes.POINTER(RAWINPUT)).contents
 
         device_path = _get_device_path(raw.header.hDevice)
-        now = time.time()
+        now = time.monotonic()
 
         events: list[RawInputEvent] = []
         if raw.header.dwType == RIM_TYPEKEYBOARD:
@@ -330,7 +414,63 @@ class RawInputSource:
                 if flags & bit:
                     events.append(RawInputEvent(device_path, signature, is_down, now))
 
-        on_event = self._on_event
-        if on_event is not None:
-            for event in events:
-                on_event(event)
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for event in events:
+            for on_event in subscribers:
+                try:
+                    on_event(event)
+                except Exception:
+                    _logger.exception(
+                        "raw input subscriber callback raised; continuing to other subscribers"
+                    )
+
+
+class SharedRawInputSource:
+    """Per-caller handle onto the process-wide RawInputSource.
+
+    shared_source() hands one of these to each caller (normally one per
+    HidPedal). It presents the same start(on_event)/stop() shape a
+    private, single-subscriber listener would, so callers do not need to
+    know they are sharing anything: it remembers the callback it
+    registered so its own zero-argument stop() removes exactly that one
+    subscriber from the shared RawInputSource underneath, never a
+    different caller's.
+    """
+
+    def __init__(self, target: RawInputSource) -> None:
+        self._target = target
+        self._on_event: Callable[[RawInputEvent], None] | None = None
+
+    def start(self, on_event: Callable[[RawInputEvent], None]) -> None:
+        self._on_event = on_event
+        self._target.start(on_event)
+
+    def stop(self) -> None:
+        if self._on_event is not None:
+            self._target.stop(self._on_event)
+            self._on_event = None
+
+
+_singleton_lock = threading.Lock()
+_singleton: RawInputSource | None = None
+
+
+def _shared_instance() -> RawInputSource:
+    global _singleton
+    with _singleton_lock:
+        if _singleton is None:
+            _singleton = RawInputSource()
+        return _singleton
+
+
+def shared_source() -> SharedRawInputSource:
+    """Return a fresh handle onto this process's single Raw Input listener.
+
+    Safe to call once per caller (HidPedal.__init__ does this by default):
+    the Win32 window/thread underneath is created once, on the first
+    handle's start(), and torn down once, when the last handle's stop()
+    leaves no subscribers registered. See RawInputSource's docstring for
+    why this needs to be a singleton at all.
+    """
+    return SharedRawInputSource(_shared_instance())

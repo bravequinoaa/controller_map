@@ -19,7 +19,7 @@ from collections.abc import Callable
 from core.events import ButtonEvent, ButtonState
 from core.ports import InputDevice
 from devices.base import PedalCandidate, normalize_hid_path
-from devices.raw_input import RawInputEvent, RawInputSource
+from devices.raw_input import RawInputEvent, RawInputListener, shared_source
 
 
 class HidPedal(InputDevice):
@@ -29,13 +29,16 @@ class HidPedal(InputDevice):
         self,
         device_id: str,
         candidate: PedalCandidate,
-        raw_input: RawInputSource | None = None,
+        raw_input: RawInputListener | None = None,
     ) -> None:
         self.device_id = device_id
         self.name = candidate.name
         self._candidate = candidate
         self._interface_keys = {normalize_hid_path(iface.path) for iface in candidate.interfaces}
-        self._raw_input = raw_input if raw_input is not None else RawInputSource()
+        # Several HidPedal instances share one process-wide Raw Input
+        # listener (devices/raw_input.py); shared_source() hands each of
+        # them its own handle onto it. Tests inject a fake here instead.
+        self._raw_input = raw_input if raw_input is not None else shared_source()
         self._signatures: dict[str, int] = {}  # raw signature -> button_id
         self._button_state: dict[int, bool] = {}  # button_id -> currently down
         self._on_event: Callable[[ButtonEvent], None] | None = None
@@ -50,6 +53,14 @@ class HidPedal(InputDevice):
         self._button_state = {}
 
     def start(self, on_event: Callable[[ButtonEvent], None]) -> None:
+        """Start streaming ButtonEvents to on_event.
+
+        on_event is invoked from the shared raw-input listener thread (see
+        devices/raw_input.py); it must return fast with no I/O or blocking
+        work, since a slow callback stalls delivery to every other device
+        sharing that thread, not just this one. Queueing and dispatch onto
+        a worker thread is Engine's responsibility (M2), not this method's.
+        """
         self._on_event = on_event
         self._raw_input.start(self._on_raw_event)
 
@@ -69,6 +80,11 @@ class HidPedal(InputDevice):
         self._learn_sink = None
 
     def _on_raw_event(self, event: RawInputEvent) -> None:
+        """Handle one RawInputEvent from the shared listener thread.
+
+        Runs inline with every other HidPedal sharing that listener; must
+        stay fast and non-blocking (see start()).
+        """
         if normalize_hid_path(event.device_path) not in self._interface_keys:
             return
 
