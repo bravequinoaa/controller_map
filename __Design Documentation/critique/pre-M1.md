@@ -1,4 +1,4 @@
-# Pre-M2 fix: shared Raw Input listener
+# Pre-M1 fix: shared Raw Input listener
 
 Follow-up to `critique/M1.md`. That review flagged two issues in
 `devices/raw_input.py` / `devices/hid_pedal.py` to resolve before `engine.py`
