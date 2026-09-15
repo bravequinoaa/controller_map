@@ -39,20 +39,41 @@ class PedalCandidate:
 
 
 def enumerate_candidates() -> list[PedalCandidate]:
-    """List connected HID devices, grouped by (vendor_id, product_id)."""
+    """List connected HID devices, grouped by (vendor_id, product_id).
+    
+    A single usb device can have multiple hid entries when enumerating with hid. 
+    Thus we must use vendor_id and product_id to differentiate between different connected
+    devices. 
+
+    Interfaces:
+        each matching key entry in hid.enumerate is an interface
+        An interface can be a specific "part" of the usb device (keyboard inputs,
+        mouse inputs, special buttons inputs, etc. )
+        so 1 device has x amount of interfaces
+        
+        Path: os level device path string used to open that interface
+    """
     grouped: dict[tuple[int, int], PedalCandidate] = {}
+
+    # use hid.enumerate to loop through connected hid devices
     for entry in hid.enumerate():
+        # grab key values
         key = (entry["vendor_id"], entry["product_id"])
+        # grab candidate from grouped if it exists
         candidate = grouped.get(key)
+
         if candidate is None:
+            # if not create a PedalCandidate object 
             candidate = PedalCandidate(
                 vendor_id=entry["vendor_id"],
                 product_id=entry["product_id"],
                 name=entry.get("product_string") or f"{entry['vendor_id']:04x}:{entry['product_id']:04x}",
                 manufacturer=entry.get("manufacturer_string") or "",
             )
+            # insert into grouped
             grouped[key] = candidate
         path = entry["path"]
+        # save information about this specific interface to the candidate
         candidate.interfaces.append(
             HidInterfaceInfo(
                 path=path.decode() if isinstance(path, bytes) else path,
