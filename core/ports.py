@@ -10,6 +10,16 @@ from collections.abc import Callable
 from core.events import AppContext, ButtonEvent, Config
 
 
+class OutputDevice(ABC):
+
+    # TODO: fix types
+    @abstractmethod
+    def send_key(self, keys: str) -> None: ...
+
+    @abstractmethod
+    def send_mouse(self, button: str) -> None: ...
+
+
 class InputDevice(ABC):
     device_id: str
     name: str
