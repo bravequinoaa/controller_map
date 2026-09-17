@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Nuitka build output (see CLAUDE.md: packaged later with Nuitka)
+*.build/
+*.dist/
+*.onefile-build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / lint / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+Desktop.ini
