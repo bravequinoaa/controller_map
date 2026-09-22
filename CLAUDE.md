@@ -26,9 +26,9 @@ written so other platforms are added as adapters, not rewrites.
 ## The dependency rule (do not violate)
 
 `core/` imports only from `core/` and the standard library. It must not import
-from `devices/`, `platform/`, `persistence/`, or `gui/`. Those depend on `core`,
-never the reverse. OS-specific and hardware-specific code lives only in `devices/`
-and `platform/`, behind the interfaces defined in `core`. If you find yourself
+from `devices/`, `platform_adapters/`, `persistence/`, or `gui/`. Those depend on
+`core`, never the reverse. OS-specific and hardware-specific code lives only in
+`devices/` and `platform_adapters/`, behind the interfaces defined in `core`. If you find yourself
 importing `pynput`, `hidapi`, or `win32*` inside `core`, stop and move it behind a
 port.
 
@@ -51,7 +51,7 @@ devices/
   base.py         # Device discovery helpers + shared HID parsing.
   hid_pedal.py    # HidPedal(InputDevice) via hidapi. Raw-HID read path + the
                   # signature matching that backs button learning.
-platform/
+platform_adapters/  # named to avoid colliding with the stdlib `platform` module
   active_window.py # WindowsActiveWindow + NullActiveWindow (ActiveWindowWatcher).
   output.py        # PynputOutputSink(OutputSink).
 persistence/
