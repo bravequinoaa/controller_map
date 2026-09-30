@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 from core.events import ButtonEvent
-from core.ports import InputDevice
+from core.ports import InputDevice, OutputSink
 
 
 class FakeInputDevice(InputDevice):
@@ -47,3 +47,25 @@ class FakeInputDevice(InputDevice):
     def emit_all(self, events: list[ButtonEvent]) -> None:
         for event in events:
             self.emit(event)
+
+
+class FakeOutputSink(OutputSink):
+    """Records every call instead of touching the OS, so tests can assert
+    what would have been sent without any real keystroke, click, or
+    process launch happening.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+
+    def send_key(self, keys: list[str]) -> None:
+        self.calls.append(("send_key", (keys,)))
+
+    def send_mouse(self, button: str) -> None:
+        self.calls.append(("send_mouse", (button,)))
+
+    def type_text(self, text: str) -> None:
+        self.calls.append(("type_text", (text,)))
+
+    def launch(self, target: str) -> None:
+        self.calls.append(("launch", (target,)))
